@@ -231,10 +231,19 @@ def main():
     parser.add_argument("--task", type=int,  default=None, help="Run single task by index (0–9)")
     parser.add_argument("--pair", type=int,  default=None, help="Run a task pair by number (1–5)")
     parser.add_argument("--list", action="store_true",     help="List all available tasks")
+    parser.add_argument("--compare", nargs="*", type=int, default=None,
+                       help="Compare GARDEN vs baseline on specified tasks (default: first 3)")
     args = parser.parse_args()
 
     if args.list:
         list_tasks()
+        return
+
+    if args.compare is not None:
+        # Import here to avoid circular imports
+        from compare_agents import run_comparison
+        task_indices = args.compare if args.compare else [0, 1, 2]
+        run_comparison(task_indices)
         return
 
     print("Loading models (one-time)...")

@@ -44,24 +44,30 @@ class DriftDetector:
 
     def check_drift(self, goal_text: str, goal_embedding, step_text: str) -> dict:
         """
-        Run both metrics and return a full result dict.
+        Run available metrics and return a result dict.
         """
-        # Metric 1 — Embedding Drift Score
-        m1 = self._metric1_embedding(goal_embedding, step_text)
+        # Metric 1 — Embedding Drift Score (if embedder and goal_embedding available)
+        m1 = self._metric1_embedding(goal_embedding, step_text) if self.embedder and goal_embedding is not None else None
 
-        # Metric 2 — LLM Alignment Judge (if LLM is available)
+        # Metric 2 — LLM Alignment Judge (if LLM available)
         m2 = self._metric2_llm_judge(goal_text, step_text) if self.llm else None
 
-        # Keyword heuristic bonus
+        # Keyword heuristic bonus (always available)
         keyword_score = self._keyword_score(step_text)
 
         # Combined alignment score
-        if m2 is not None:
-            # Blend: 50% embedding sim, 20% keyword, 30% LLM judge
+        if m1 is not None and m2 is not None:
+            # Both metrics: 50% embedding sim, 20% keyword, 30% LLM judge
             final_score = 0.5 * m1["similarity"] + 0.2 * keyword_score + 0.3 * m2["normalised"]
-        else:
-            # Without LLM: 70% embedding sim, 30% keyword
+        elif m1 is not None:
+            # Embedding only: 70% embedding sim, 30% keyword
             final_score = 0.7 * m1["similarity"] + 0.3 * keyword_score
+        elif m2 is not None:
+            # LLM judge only: 70% LLM judge, 30% keyword
+            final_score = 0.7 * m2["normalised"] + 0.3 * keyword_score
+        else:
+            # Fallback: keyword only
+            final_score = keyword_score
 
         # Drift score = 1 − alignment (per architecture spec)
         drift_score   = 1.0 - final_score
@@ -69,7 +75,7 @@ class DriftDetector:
 
         return {
             "step":            step_text,
-            "similarity":      m1["similarity"],
+            "similarity":      m1["similarity"] if m1 else None,
             "keyword_score":   keyword_score,
             "llm_score":       m2["raw"] if m2 else None,
             "llm_normalised":  m2["normalised"] if m2 else None,

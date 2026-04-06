@@ -30,7 +30,7 @@ class AgentLoop:
         self.correction_module = CorrectionModule()
 
         self.rag = RAGModule(embedder)
-        self._seed_rag()
+        # Note: RAG seeding will happen in run() method with goal-specific content
 
         self.evaluator = EvaluationLayer()
 
@@ -43,6 +43,10 @@ class AgentLoop:
         self.context_memory = ContextMemory()
         self.backtracker    = BacktrackingEngine()
         self.evaluator      = EvaluationLayer()
+        self.corrections_applied = 0
+
+        # Seed RAG with goal-specific content
+        self._seed_rag(goal_data)
 
         print("\n" + "=" * 60)
         print("  GARDEN — Goal-Anchored Retrieval-Driven Drift Evaluation")
@@ -108,6 +112,7 @@ class AgentLoop:
 
             if drift_result["drift_detected"]:
                 self.backtracker.record_drift()
+                self.corrections_applied += 1
 
                 corrected_step = self.correction_module.apply_correction(
                     goal_data = goal_data,
@@ -136,6 +141,21 @@ class AgentLoop:
         for idx, s in enumerate(self.context_memory.steps, 1):
             print(f"    {idx}. {s}")
 
+        # Return evaluation results for comparison
+        final_trace = [s for s in self.context_memory.steps if len(s) < 200]
+        goal_adherence = self.evaluator.goal_adherence_score()
+
+        return {
+            "agent_type": "Hybrid (GARDEN)",
+            "steps_taken": len(self.context_memory.steps),
+            "task_completed": self.evaluator.task_completed,
+            "goal_adherence": goal_adherence,
+            "avg_drift_score": self.evaluator.average_drift_score(),
+            "drift_trajectory": self.evaluator.drift_trajectory,
+            "corrections_applied": self.corrections_applied,
+            "final_trace": final_trace
+        }
+
     def _is_complete(self, step: str, context: dict) -> bool:
         """
         Task is complete when the step signals a final deliverable
@@ -155,7 +175,111 @@ class AgentLoop:
                       if len(s) < 200 and not s.startswith("ORIGINAL GOAL")]
         return len(real_steps) >= 3 and any(s in step.lower() for s in signals)
 
-    def _seed_rag(self) -> None:
+    def _seed_rag(self, goal_data: dict = None) -> None:
+        """Seed RAG with real academic content from ArXiv based on goal topics."""
+        try:
+            import arxiv
+            arxiv_client = arxiv.Client()
+
+            # Extract topics dynamically from goal data or use defaults
+            topics = self._extract_topics_from_goal(goal_data) if goal_data else [
+                "renewable energy",
+                "climate change agriculture",
+                "AI medical diagnosis",
+                "carbon taxation policy",
+                "comparative analysis solar wind energy",
+                "vaccine hesitancy psychology",
+                "artificial general intelligence societal impact",
+                "AI ethics framework",
+                "remote work productivity mental health",
+                "global healthcare emerging technologies"
+            ]
+
+            print(f"Seeding RAG with real ArXiv content for topics: {topics}")
+
+            for topic in topics:
+                try:
+                    search = arxiv.Search(
+                        query=topic,
+                        max_results=5,  # Increased from 3 to 5 for better coverage
+                        sort_by=arxiv.SortCriterion.Relevance,
+                        sort_order=arxiv.SortOrder.Descending  # Most recent first
+                    )
+                    results = list(arxiv_client.results(search))
+
+                    for paper in results:
+                        # Add paper title and abstract
+                        content = f"{paper.title}: {paper.summary[:400]}..."  # Increased abstract length
+                        self.rag.add_documents([content])
+
+                        # Add key insights from comments if available
+                        if hasattr(paper, 'comment') and paper.comment:
+                            insight_content = f"Key insights on {topic}: {paper.comment[:250]}..."
+                            self.rag.add_documents([insight_content])
+
+                        # Add author and publication info
+                        meta_content = f"Paper metadata - {paper.title}: Authors: {', '.join(author.name for author in paper.authors[:3])}; Published: {paper.published.year}; Categories: {', '.join(paper.categories[:3])}"
+                        self.rag.add_documents([meta_content])
+
+                    print(f"Added {len(results)} papers for topic: {topic}")
+
+                except Exception as e:
+                    print(f"Failed to fetch ArXiv papers for {topic}: {e}")
+                    continue
+
+        except ImportError:
+            print("ArXiv library not available, using fallback seeding")
+            self._seed_rag_fallback()
+
+    def _extract_topics_from_goal(self, goal_data: dict) -> list[str]:
+        """Extract relevant search topics from the goal data."""
+        goal_text = goal_data.get("goal_text", "").lower()
+        constraints = goal_data.get("constraints", [])
+        subtasks = goal_data.get("subtasks", [])
+
+        topics = []
+
+        # Extract from goal text
+        if "renewable energy" in goal_text or "solar" in goal_text or "wind" in goal_text:
+            topics.extend(["renewable energy", "solar photovoltaic", "wind turbines"])
+        if "climate change" in goal_text and "agriculture" in goal_text:
+            topics.extend(["climate change agriculture", "sustainable agriculture"])
+        if "ai" in goal_text and "medical" in goal_text:
+            topics.extend(["AI medical diagnosis", "machine learning healthcare"])
+        if "carbon" in goal_text and "taxation" in goal_text:
+            topics.extend(["carbon taxation policy", "emissions trading"])
+        if "vaccine" in goal_text and "hesitancy" in goal_text:
+            topics.extend(["vaccine hesitancy psychology", "vaccination behavior"])
+        if "artificial general intelligence" in goal_text or "agi" in goal_text:
+            topics.extend(["artificial general intelligence", "AGI societal impact"])
+        if "ai ethics" in goal_text:
+            topics.extend(["AI ethics framework", "machine learning ethics"])
+        if "remote work" in goal_text:
+            topics.extend(["remote work productivity", "telecommuting mental health"])
+        if "healthcare" in goal_text and "emerging technologies" in goal_text:
+            topics.extend(["future healthcare technologies", "digital health innovation"])
+
+        # Extract from constraints
+        for constraint in constraints:
+            if "academic" in constraint:
+                topics.append("academic research methodology")
+            if "peer-reviewed" in constraint:
+                topics.append("peer reviewed publications")
+
+        # Extract from subtasks
+        for subtask in subtasks:
+            if "search" in subtask or "find" in subtask:
+                topics.append("literature search strategies")
+            if "summarize" in subtask:
+                topics.append("research synthesis methods")
+            if "categorize" in subtask:
+                topics.append("thematic analysis research")
+
+        # Remove duplicates and return
+        return list(set(topics)) if topics else ["academic research", "literature review"]
+
+    def _seed_rag_fallback(self) -> None:
+        """Fallback seeding with hardcoded knowledge when ArXiv unavailable."""
         self.rag.add_documents([
             # Pair 1 — Literature surveys
             "Steps in a literature survey: search databases, read abstracts, summarize, categorize by theme, write report",
