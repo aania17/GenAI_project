@@ -73,7 +73,7 @@ The architecture diagram was used as a specification to build all missing compon
 
 ### Multi-task runner
 
-`main.py` was rewritten from a single hardcoded task to a 5-task CLI runner:
+`main.py` was rewritten from a single hardcoded task to a CLI runner:
 - `python main.py` runs all tasks sequentially
 - `python main.py --task N` runs a single task by index
 - `python main.py --list` shows all available tasks
@@ -95,9 +95,7 @@ The architecture diagram was used as a specification to build all missing compon
 
 **Symptom:** The system entered a loop where the correction step (a long goal reminder paragraph) was stored as a reasoning step, then fed back as `LAST STEP TAKEN` in the next prompt, causing the next generated step to be another garbled variation of the reminder.
 
-**Fix:** `reasoning_engine.py` now filters steps before building prompts — any step longer than 200 characters or starting with `"ORIGINAL GOAL"` is excluded from the history passed to the LLM.
-
-`correction_module.py` was rewritten to return short concrete actions (under 100 chars, e.g. `"Search Web of Science and Scopus for papers"`) rather than long reminder paragraphs.
+**Fix:** `reasoning_engine.py` now filters steps before building prompts — any step longer than 200 characters or starting with `"ORIGINAL GOAL"` is excluded from the history passed to the LLM. `correction_module.py` was rewritten to return short concrete actions (under 100 chars) rather than long reminder paragraphs.
 
 ### Bug: FLAN-T5 generating single-character outputs
 
@@ -129,7 +127,7 @@ The architecture diagram was used as a specification to build all missing compon
 
 **Symptom:** `ImportError: cannot import name 'GoalDecomposer' from 'core.goal_decomposer'`
 
-**Root cause:** The user's local file had the class named `GoalProcessor` (copied from the wrong file) instead of `GoalDecomposer`.
+**Root cause:** The user's local file had the class named `GoalProcessor` instead of `GoalDecomposer`.
 
 **Fix:** Provided correct `goal_decomposer.py` with `GoalDecomposer` class containing only `decompose()` and `_llm_decompose()`.
 
@@ -137,7 +135,7 @@ The architecture diagram was used as a specification to build all missing compon
 
 **Symptom:** `TypeError: DriftDetector.__init__() got an unexpected keyword argument 'llm'`
 
-**Root cause:** User's local `drift_detector.py` was the original version with signature `__init__(self, embedder, threshold=0.5)` — no `llm` parameter.
+**Root cause:** User's local `drift_detector.py` had signature `__init__(self, embedder, threshold=0.5)` — no `llm` parameter.
 
 **Fix:** Updated signature to `__init__(self, embedder, llm=None, threshold=0.5)` with full Metric 2 LLM judge implementation.
 
@@ -167,41 +165,40 @@ The architecture diagram was used as a specification to build all missing compon
 
 ---
 
-## Phase 4 — LLM Upgrade (FLAN-T5 → Llama 3.2)
+## Phase 4 — LLM Upgrade (FLAN-T5 → Llama 3.2 via Ollama)
 
 ### Why the upgrade was necessary
 
-FLAN-T5-base has a hard ceiling on output quality for agentic tasks:
-- Generates title-like fragments instead of action sentences
-- Cannot reliably rate alignment 1–5 (LLM judge always returned neutral fallback 3)
-- Requires heavily stripped-down prompts that lose context
-- Steps like `"Thesis: Renewable Energy and Science: Thesis: A Literature Survey"` were representative outputs
+FLAN-T5-base has a hard ceiling on output quality for agentic tasks. It generates title-like fragments instead of action sentences, cannot reliably rate alignment 1–5 (LLM judge always returned the neutral fallback of 3), requires heavily stripped-down prompts that lose context, and produced steps like `"Thesis: Renewable Energy and Science: Thesis: A Literature Survey"`.
 
 ### What changed
 
 **`utils/llm_engine.py`** — Completely rewritten. Removed all `transformers` and `torch` dependencies. Now communicates with Ollama via HTTP POST to `http://localhost:11434/api/generate`. Added `_verify_connection()` to check Ollama is running and the model is available at startup. Added timeout handling with fallback responses.
 
-**`prompts/prompt_templates.py`** — Rewritten for Llama 3.2. Prompts are now properly structured with named fields (`GOAL:`, `CURRENT SUBTASK:`, `LAST STEP TAKEN:`, `RELEVANT KNOWLEDGE:`) because Llama follows instruction formatting correctly. The FLAN-T5 workarounds (action verb maps, stripped prompts) were removed.
+**`prompts/prompt_templates.py`** — Rewritten for Llama 3.2. Prompts now use proper instruction formatting with named fields (`GOAL:`, `CURRENT SUBTASK:`, `LAST STEP TAKEN:`, `RELEVANT KNOWLEDGE:`). The FLAN-T5 workarounds were removed.
 
-**`core/reasoning_engine.py`** — `_clean()` simplified significantly. Llama 3.2 rarely echoes prompts, so only light cleanup is needed. Sentence splitting logic kept to ensure single-sentence output.
+**`core/reasoning_engine.py`** — `_clean()` simplified significantly. Llama 3.2 rarely echoes prompts, so only light cleanup is needed.
 
 **`core/agent_loop.py`** — `use_llm_judge` default changed from `False` to `True`. Both drift metrics are now active simultaneously.
 
-**`requirements.txt`** — `torch` and `transformers` removed. `requests` added. Optional `arxiv` and `duckduckgo-search` added for future real-tool integration.
+**`requirements.txt`** — `torch` and `transformers` removed entirely. `requests` added.
 
 ### Results after upgrade
 
-Before (FLAN-T5): Steps like `"Thesis: Renewable Energy and Science: Thesis: A Literature Survey"`, avg drift 0.55–0.85, LLM judge disabled.
-
-After (Llama 3.2): Steps like `"Search academic databases such as Scopus, Web of Science, and Google Scholar using keywords 'renewable energy', 'solar photovoltaic', 'wind turbines' to find relevant papers published in the last 5 years"`, avg drift 0.40–0.55, LLM judge enabled.
+| Metric | FLAN-T5 | Llama 3.2 |
+|---|---|---|
+| Step quality | Garbage titles | Specific research actions |
+| Avg drift score | 0.55–0.85 | 0.40–0.55 |
+| LLM judge | Disabled (always returned 3) | Enabled and accurate |
+| Model load time | Every task (~30s each) | Once total at startup |
 
 ---
 
-## Phase 5 — Final Fixes
+## Phase 5 — Evaluation Improvements
 
 ### Completion detection expanded
 
-`_is_complete()` in `agent_loop.py` originally had 7 completion signals. Llama 3.2 phrases completion steps more naturally than the expected exact phrases. Expanded to 18 signals including: `annotate and extract`, `compile`, `draft the report`, `prepare the report`, `write up`, `document the findings`, `produce the report`, `write the literature`, `complete the survey`.
+`_is_complete()` in `agent_loop.py` originally had 7 completion signals. Llama 3.2 phrases completion steps more naturally than exact expected phrases. Expanded to 18 signals including `annotate and extract`, `compile`, `draft the report`, `prepare the report`, `write up`, `document the findings`, `produce the report`, `write the literature`, `complete the survey`.
 
 ### Executor keyword coverage expanded
 
@@ -209,13 +206,42 @@ After (Llama 3.2): Steps like `"Search academic databases such as Scopus, Web of
 
 ---
 
-## Current Feature Status
+## Phase 6 — Task Set Redesign (5 tasks → 10 tasks in 5 pairs)
 
-### Fully implemented and working
+### Why the original 5 tasks were insufficient
+
+The original 5 tasks all belonged to the same category — literature surveys and research summaries. They triggered the same subtask template, used the same executor handlers, and produced similar drift patterns. This meant the system was being tested on the same scenario 5 times with different topics, which does not constitute a meaningful evaluation for a paper.
+
+For a research paper, the task set needs to demonstrate variety across task type, goal structure, and expected drift risk — showing that GARDEN works across diverse scenarios, not just one type.
+
+### New task set design
+
+10 tasks organised into 5 pairs. Tasks within a pair share a type but differ in topic and complexity, enabling direct within-pair comparison of drift scores and correction patterns.
+
+| Pair | Type | Drift Risk | Rationale |
+|---|---|---|---|
+| 1 | Literature Surveys | Low | Baseline — clean execution, well-scoped goals |
+| 2 | Comparative Analysis | Medium | Dual-thread drift, agent fixates on one side |
+| 3 | Multi-Step Planning | Medium-High | Sequential decisions, backtracking most active |
+| 4 | Factual QA | Variable | Goal broadening rather than topic drift |
+| 5 | Open-Ended Exploration | High | Stress test, maximum corrections expected |
+
+### Changes made
+
+**`main.py`** — TASKS list expanded from 5 to 10 entries. Each task now includes `pair` and `drift_risk` fields. Added `--pair` CLI flag to run both tasks in a pair. Added `_print_summary()` to display the pair design table after all tasks complete. `run_task()` now prints the pair number and expected drift risk in the task header.
+
+**`data/goal_processor.py`** — SUBTASK_TEMPLATES expanded from 3 entries to 9, covering the new task types: `compare`, `plan`, `design`, `what`, `how`, `explore`, `investigate`. CONSTRAINT_MAP expanded from 6 entries to 12, adding: `peer-reviewed`, `evidence`, `structured`, `step-by-step`, `compare`, `plan`.
+
+**`core/agent_loop.py`** — `_seed_rag()` expanded from 7 documents to 20, with domain knowledge covering all 5 task pair types. Added 3 successful plan templates (survey, comparative, planning) instead of 1.
+
+---
+
+## Current Feature Status
 
 | Feature | File | Status |
 |---|---|---|
 | Goal extraction with constraints and subtasks | `data/goal_processor.py` | ✅ Complete |
+| 9 subtask templates covering all task types | `data/goal_processor.py` | ✅ Complete |
 | Persistent goal memory with embedding | `data/memory_store.py` | ✅ Complete |
 | Goal anchoring prompt | `prompts/prompt_templates.py` | ✅ Complete |
 | Reflection prompt (YES/NO) | `prompts/prompt_templates.py` | ✅ Complete |
@@ -226,16 +252,13 @@ After (Llama 3.2): Steps like `"Search academic databases such as Scopus, Web of
 | Context memory (steps, observations, subtasks) | `core/context_memory.py` | ✅ Complete |
 | Goal-aware executor with 20 keyword handlers | `core/executor.py` | ✅ Complete |
 | Backtracking with checkpoint stack | `core/backtracking_engine.py` | ✅ Complete |
-| FAISS RAG vector store + retrieval | `core/rag_module.py` | ✅ Complete |
+| FAISS RAG with 20 seeded documents + 3 plan templates | `core/rag_module.py` | ✅ Complete |
 | Drift Metric 1: embedding cosine similarity | `core/drift_detector.py` | ✅ Complete |
 | Drift Metric 2: LLM alignment judge (1–5) | `core/drift_detector.py` | ✅ Complete |
 | Goal Reminder correction strategy | `core/correction_module.py` | ✅ Complete |
 | Plan Regeneration correction strategy | `core/correction_module.py` | ✅ Complete |
-| Task success rate metric | `core/evaluation_layer.py` | ✅ Complete |
-| Goal adherence score metric | `core/evaluation_layer.py` | ✅ Complete |
-| Drift score trajectory | `core/evaluation_layer.py` | ✅ Complete |
-| Pass@1 metric | `core/evaluation_layer.py` | ✅ Complete |
-| Multi-task CLI runner (5 tasks) | `main.py` | ✅ Complete |
+| Task success rate, adherence, drift, Pass@1 | `core/evaluation_layer.py` | ✅ Complete |
+| 10-task CLI runner with --task, --pair, --list | `main.py` | ✅ Complete |
 | Single model load shared across all tasks | `main.py` + `agent_loop.py` | ✅ Complete |
 | Ollama/Llama 3.2 backend | `utils/llm_engine.py` | ✅ Complete |
 | Sentence-Transformers embedding | `utils/embedding_engine.py` | ✅ Complete |
@@ -245,25 +268,25 @@ After (Llama 3.2): Steps like `"Search academic databases such as Scopus, Web of
 
 ## What Is Left To Do
 
-### High priority — would significantly improve results
+### High priority — significantly improves results and scientific validity
 
 **1. Real executor tools**
 
-Currently all executor observations are mock strings. Replacing them with real tool calls would make the agent's reasoning grounded in actual retrieved information.
+Currently all executor observations are mock strings. Replacing them with real tool calls would make the agent's reasoning grounded in actual retrieved information rather than fictional paper titles.
 
 ```python
-# Option A: DuckDuckGo (free, no API key)
+# Option A: DuckDuckGo (free, no API key needed)
 pip install duckduckgo-search
 
 # Option B: ArXiv API (free, academic papers)
 pip install arxiv
 ```
 
-Files to change: `core/executor.py` — replace `_handle_search()` and `_handle_retrieve()` with real API calls.
+Files to change: `core/executor.py` — replace `_handle_search()` and `_handle_retrieve()`.
 
 **2. Real RAG content from ArXiv**
 
-The RAG vector store is seeded with 7 hardcoded strings. Loading real paper abstracts from ArXiv would dramatically improve the quality of retrieved context injected into reasoning prompts.
+The RAG vector store is seeded with 20 hardcoded strings. Loading real paper abstracts from ArXiv would dramatically improve retrieved context quality.
 
 ```python
 import arxiv
@@ -274,17 +297,17 @@ def seed_rag_from_arxiv(self, query: str, max_papers: int = 20):
         self.rag.add_documents([f"{paper.title}: {paper.summary[:300]}"])
 ```
 
-Files to change: `core/agent_loop.py` — replace `_seed_rag()` with arxiv-based seeding.
+Files to change: `core/agent_loop.py` — replace `_seed_rag()` with arxiv-based seeding per task topic.
 
 **3. Baseline agent comparison**
 
-The evaluation layer records GARDEN's metrics but never compares against a baseline. Without a comparison, the drift detection value cannot be demonstrated quantitatively.
+The evaluation layer records GARDEN's metrics but never compares against a baseline. Without a comparison, the drift detection value cannot be demonstrated quantitatively for a paper.
 
-A minimal baseline would be a `BaselineAgent` class in `core/agentbench_runner.py` that runs the same tasks using the same LLM but with no drift detection, no correction module, and no RAG — just raw step generation. The `comparison_report()` method already has placeholder rows for baseline estimates; these should be replaced with real measured values.
+A minimal baseline would be a `BaselineAgent` class in `core/agentbench_runner.py` that runs the same tasks using the same LLM but with no drift detection, no correction module, and no RAG. The `comparison_report()` method already has placeholder rows for baseline estimates; these should be replaced with real measured values.
 
 **4. Escalating correction strategy**
 
-The correction module currently uses a binary choice (goal reminder vs plan regeneration) based on whether task signals are present in the drifted step. A more sophisticated approach would escalate based on how many consecutive drifts have occurred:
+The correction module currently uses a binary choice. A more sophisticated approach would escalate based on consecutive drift count:
 - First drift: goal reminder nudge
 - Second consecutive drift: LLM plan regeneration
 - Third consecutive drift: break current subtask into smaller pieces and retry
@@ -293,62 +316,28 @@ Files to change: `core/correction_module.py`.
 
 **5. Better embedding model**
 
-`all-MiniLM-L6-v2` is fast (384 dimensions) but `all-mpnet-base-v2` (768 dimensions) is meaningfully more accurate for semantic similarity tasks, which directly affects drift detection quality.
+`all-MiniLM-L6-v2` (384 dimensions) is fast but `all-mpnet-base-v2` (768 dimensions) is meaningfully more accurate for semantic similarity, which directly affects drift detection quality.
 
 Files to change: `utils/embedding_engine.py` — change the model name string.
 
 ### Medium priority — improves quality without changing architecture
 
-**6. MMR retrieval in RAG**
-
-Current retrieval uses pure nearest-neighbour search, which can return 3 nearly-identical documents. Maximal Marginal Relevance (MMR) balances relevance and diversity.
-
-Files to change: `core/rag_module.py` — add `retrieve_mmr()` method.
-
-**7. Larger Ollama model**
-
-`llama3.2` is the 3B parameter model. `llama3.1` (8B) or `llama3.3` (70B, requires significant RAM) would produce noticeably better steps and more accurate LLM judge ratings.
-
-Files to change: `utils/llm_engine.py` — change default model string. Or pass `LLMEngine(model="llama3.1")` in `main.py`.
-
-**8. Task completion detection via LLM**
-
-The current `_is_complete()` method uses keyword matching against 18 signals. A more reliable approach would ask the LLM directly:
-
-```python
-def _is_complete_llm(self, step, goal, steps_done):
-    prompt = f"Goal: {goal}\nSteps taken: {len(steps_done)}\nLatest step: {step}\nIs the goal achieved? Answer yes or no."
-    return "yes" in self.llm.generate(prompt, max_length=5).lower()
-```
-
-Files to change: `core/agent_loop.py` — replace or augment `_is_complete()`.
-
-**9. Persistent RAG across tasks**
-
-Currently the RAG vector store is created fresh for each `AgentLoop` instantiation. Sharing it across tasks would allow the system to retrieve reasoning traces from previous tasks as relevant context.
-
-Files to change: `core/agent_loop.py` — move RAG initialisation outside the class and pass it in as a parameter.
-
-### Lower priority — nice to have
-
-**10. Full AgentBench Integration**
+**6. Full AgentBench Integration**
 
 This is the most important remaining item for proving GARDEN's value as a research contribution.
 
 #### What AgentBench is and why it matters
 
-AgentBench is a benchmark framework specifically designed to evaluate LLM agents on multi-step, real-world tasks. Unlike standard datasets with static input-output pairs, AgentBench provides **interactive environments** where the agent must take a sequence of actions, receive feedback after each one, and complete a goal across multiple steps — exactly the conditions where context drift naturally emerges.
+AgentBench is a benchmark framework designed to evaluate LLM agents on multi-step, real-world tasks. Unlike standard datasets with static input-output pairs, AgentBench provides **interactive environments** where the agent takes a sequence of actions, receives real feedback after each one, and completes a goal across multiple steps — exactly the conditions where context drift naturally emerges.
 
 The core question AgentBench answers is: *"Can an AI agent complete a complex task step-by-step without going off track?"*
 
-For GARDEN specifically, AgentBench matters because:
+For GARDEN specifically:
 - **Our mock executor is fictional.** Every observation currently returned by `executor.py` is a hardcoded string. AgentBench provides real environment feedback — actual search results, actual tool outputs, actual task state.
-- **Our 5 tasks are toy examples.** AgentBench provides standardised benchmark tasks used across the research community, making our results comparable to other published systems.
-- **Without it, we cannot prove GARDEN works.** Showing lower drift scores on our own 5 made-up tasks does not constitute a scientific evaluation. Running GARDEN on AgentBench tasks and comparing against a baseline ReAct agent does.
+- **Our 10 tasks are custom examples.** AgentBench provides standardised benchmark tasks used across the research community, making results comparable to other published systems.
+- **Without it, scientific validity is limited.** Showing lower drift scores on custom-designed tasks does not constitute a full scientific evaluation. Running GARDEN on AgentBench tasks and comparing against a baseline ReAct agent does.
 
 #### What AgentBench provides
-
-AgentBench supplies task environments across several categories:
 
 | Environment | What the agent does | Why drift is likely |
 |---|---|---|
@@ -358,17 +347,9 @@ AgentBench supplies task environments across several categories:
 | Reasoning chains | Multi-hop inference over documents | Agent follows wrong inference branch |
 | Tool use | Sequence of API calls to complete a task | Agent misuses tools toward wrong sub-goal |
 
-All of these produce long reasoning chains where GARDEN's drift detection is directly applicable.
-
 #### Current state of integration
 
-`core/agentbench_runner.py` is fully structured for AgentBench but currently uses a mock task registry of 3 hardcoded tasks. The infrastructure is complete — it just needs the real AgentBench task loader to replace the mock one.
-
-The file already implements:
-- `run_task(task_id)` — runs a single task through the full GARDEN pipeline
-- `run_all()` — runs all registered tasks
-- `comparison_report()` — prints GARDEN vs baseline table
-- `save_results()` — exports metrics to JSON
+`core/agentbench_runner.py` is fully structured but uses a mock task registry of 3 hardcoded tasks. The infrastructure is complete — it needs the real AgentBench task loader to replace the mock one. The file already implements `run_task()`, `run_all()`, `comparison_report()`, and `save_results()`.
 
 #### How to complete the integration
 
@@ -383,7 +364,6 @@ pip install -e .
 **Step 2 — Replace the mock task loader in `core/agentbench_runner.py`**
 
 ```python
-# Replace _load_task() with:
 from agentbench import TaskLoader
 
 def _load_task(self, task_id: str) -> dict:
@@ -395,24 +375,20 @@ def _load_task(self, task_id: str) -> dict:
     }
 ```
 
-**Step 3 — Replace the mock executor with AgentBench tool calls**
-
-The `Executor` class in `core/executor.py` needs to call the real AgentBench environment instead of returning mock strings:
+**Step 3 — Replace the mock executor with AgentBench tool calls in `core/executor.py`**
 
 ```python
 from agentbench import Environment
 
 class Executor:
     def __init__(self, env: Environment = None):
-        self.env = env   # inject real environment when available
+        self.env = env
 
     def execute(self, step: str, goal_text: str) -> str:
         if self.env is not None:
-            # Call the real AgentBench environment
             action = self._parse_action(step)
             observation = self.env.step(action)
             return observation.text
-        # Fall back to mock if no environment is injected
         return self._mock_execute(step, goal_text)
 ```
 
@@ -424,20 +400,12 @@ from core.agentbench_runner import AgentBenchRunner
 
 embedder = EmbeddingEngine()
 runner   = AgentBenchRunner(embedder)
-
-# Run all AgentBench tasks
 runner.run_all()
-
-# Print comparison: GARDEN vs baseline ReAct
 print(runner.comparison_report())
-
-# Save to disk for report/presentation
 runner.save_results("agentbench_results.json")
 ```
 
-#### What the results should show
-
-The expected outcome, based on the architecture paper, is:
+#### Expected results
 
 | System | Avg Drift Score | Task Success | Goal Adherence |
 |---|---|---|---|
@@ -445,50 +413,84 @@ The expected outcome, based on the architecture paper, is:
 | Standard ReAct agent | ~0.45 | ~50% | ~0.55 |
 | GARDEN | ~0.25 | ~70% | ~0.75 |
 
-GARDEN should show meaningfully lower drift scores and higher task success rates because the correction module actively re-aligns the agent whenever it drifts, while the baseline agents have no such mechanism.
-
 #### Files to change
 
 - `core/agentbench_runner.py` — replace `_load_task()`, add real environment injection
 - `core/executor.py` — add `env` parameter to `__init__`, route to real environment when available
 - `core/agent_loop.py` — pass environment into `Executor` constructor
-- `main.py` — add an `--agentbench` CLI flag to run AgentBench evaluation mode
+- `main.py` — add `--agentbench` CLI flag to run AgentBench evaluation mode
 
-**11. JSON result export**
+**7. MMR retrieval in RAG**
 
-`EvaluationLayer` produces a printed report but does not save results to disk. Adding `save_results()` to the evaluation layer and calling it at the end of each task run would allow post-run analysis.
+Current retrieval uses pure nearest-neighbour search, which can return 3 nearly-identical documents. Maximal Marginal Relevance (MMR) balances relevance and diversity.
+
+Files to change: `core/rag_module.py` — add `retrieve_mmr()` method.
+
+**8. Larger Ollama model**
+
+`llama3.2` is the 3B parameter model. `llama3.1` (8B) would produce noticeably better steps and more accurate LLM judge ratings with no code changes — just run `ollama pull llama3.1` and change the model name in `main.py`.
+
+**9. Task completion detection via LLM**
+
+The current `_is_complete()` uses keyword matching against 18 signals. A more reliable approach:
+
+```python
+def _is_complete_llm(self, step, goal, steps_done):
+    prompt = f"Goal: {goal}\nSteps taken: {len(steps_done)}\nLatest step: {step}\nIs the goal achieved? Answer yes or no."
+    return "yes" in self.llm.generate(prompt, max_length=5).lower()
+```
+
+Files to change: `core/agent_loop.py` — replace or augment `_is_complete()`.
+
+**10. Persistent RAG across tasks**
+
+Currently the RAG vector store resets for each task. Sharing it across tasks would allow the system to retrieve successful reasoning traces from previous tasks as context for new ones.
+
+Files to change: `core/agent_loop.py` — move RAG initialisation outside the class and pass it as a parameter.
+
+### Lower priority — nice to have
+
+**11. JSON result export per task**
+
+`EvaluationLayer` produces a printed report but does not save results to disk. Adding export at the end of each task run would allow post-run analysis and graph generation.
 
 **12. Drift visualisation**
 
-The drift trajectory is recorded as a list of floats per task. Plotting this with `matplotlib` would make the evaluation results visually presentable for a report or presentation.
+The drift trajectory is recorded as a list of floats per task. Plotting this with `matplotlib` across the 10 tasks — grouped by pair — would make the evaluation results visually compelling for a report or presentation.
 
 ```python
 import matplotlib.pyplot as plt
 
-def plot_drift_trajectory(trajectory, task_name):
-    plt.plot(trajectory, marker='o')
-    plt.axhline(y=0.5, color='r', linestyle='--', label='threshold')
-    plt.title(f"Drift Trajectory: {task_name}")
-    plt.ylabel("Drift Score")
-    plt.xlabel("Iteration")
-    plt.legend()
-    plt.savefig(f"drift_{task_name}.png")
+def plot_drift_by_pair(results_by_pair: dict):
+    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+    for ax, (pair_num, results) in zip(axes, results_by_pair.items()):
+        for result in results:
+            ax.plot(result["drift_trajectory"], marker='o', label=result["task_name"][:20])
+        ax.axhline(y=0.5, color='r', linestyle='--', label='threshold τ')
+        ax.set_title(f"Pair {pair_num}")
+        ax.set_ylabel("Drift Score")
+        ax.set_xlabel("Iteration")
+        ax.legend(fontsize=6)
+    plt.tight_layout()
+    plt.savefig("drift_trajectories_by_pair.png")
 ```
 
 **13. Streaming output from Ollama**
 
-Currently Ollama responses are awaited fully before displaying. Enabling streaming (`"stream": True` in the payload) would show tokens as they are generated, making the system feel more responsive.
+Currently Ollama responses are awaited fully before displaying. Enabling streaming (`"stream": True` in the payload) would show tokens as they are generated, making the system feel more responsive during long reasoning steps.
 
 ---
 
 ## Known Limitations
 
-**Drift threshold is not task-adaptive.** The threshold `τ = 0.5` is fixed across all tasks. Some tasks naturally produce steps with lower embedding similarity to the goal (e.g. comparative tasks) and will trigger false positive drift detections. A per-task calibrated threshold, or an adaptive threshold based on early-iteration scores, would reduce false positives.
+**Drift threshold is not task-adaptive.** The threshold `τ = 0.5` is fixed across all 10 tasks. Pair 5 (open-ended exploration) tasks naturally produce higher embedding drift scores because the goal text is vague, meaning they will always trigger more corrections than Pair 1 tasks — not because the agent is doing worse, but because the goal is harder to measure similarity against. A per-pair calibrated threshold would reduce false positives on open-ended tasks.
 
-**Keyword heuristic is domain-specific.** The `TASK_KEYWORDS` list in `drift_detector.py` is biased toward research and energy topics. For tasks in other domains, the keyword bonus would be 0, reducing the effectiveness of drift detection. This should be made dynamic based on the goal text.
+**Keyword heuristic is domain-specific.** The `TASK_KEYWORDS` list in `drift_detector.py` is biased toward research and academic topics. For Pair 3 (planning) and Pair 5 (exploration) tasks, fewer keywords will match, reducing the keyword bonus and potentially increasing measured drift. This should be made dynamic — derived from the goal text rather than hardcoded.
 
-**Executor observations are still simulated.** Even with goal-aware text, the observations are not based on real retrieved data. The agent reasons correctly but on fictional paper titles and fictional findings.
+**Executor observations are still simulated.** Even with goal-aware text, the observations are not based on real retrieved data. The agent reasons correctly but on fictional paper titles and fictional findings. This is the single biggest gap between the current implementation and a production system.
 
-**Pass@1 is always 0.** Pass@1 requires both task completion and zero drift events. With the current mock executor and 5 iterations, tasks rarely reach a natural completion step, so `task_completed` stays False and Pass@1 cannot be 1.0. Real tools and more iterations would fix this.
+**Pass@1 is always 0.** Pass@1 requires both task completion and zero drift events. With the current mock executor and 6 iterations, tasks rarely reach a natural completion step, so `task_completed` stays False and Pass@1 cannot be 1.0. Real tools and AgentBench integration would fix this.
 
-**No memory across tasks.** Each task starts with a fresh `ContextMemory` and a fresh RAG store (except the 7 seeded documents). A production system would retain successful reasoning traces across runs.
+**No memory across tasks.** Each task starts with a fresh `ContextMemory` and a freshly-seeded RAG store. A production system would retain successful reasoning traces from previous tasks, allowing the agent to learn from its own history.
+
+**10 custom tasks cannot replace AgentBench.** The task pairs were designed to produce interpretable drift patterns for demonstration purposes. They are not a substitute for standardised benchmark evaluation. The comparison table in `agentbench_runner.py` currently uses estimated baseline values — only real AgentBench runs will produce scientifically defensible numbers.
